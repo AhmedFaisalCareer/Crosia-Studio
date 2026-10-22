@@ -309,9 +309,11 @@ def delete_product(product_id):
 
 
 
+
 def create_order(name, email, phone, address, payment_method, cart, total):
     import json
     import sqlite3
+    import uuid
     from datetime import datetime
 
     conn = sqlite3.connect("croshia_store.db")
@@ -319,8 +321,11 @@ def create_order(name, email, phone, address, payment_method, cart, total):
     try:
         cur = conn.cursor()
 
+        order_code = "CR-" + uuid.uuid4().hex[:8].upper()
+
         cur.execute("""
             INSERT INTO orders (
+                order_code,
                 customer_name,
                 email,
                 phone,
@@ -331,8 +336,9 @@ def create_order(name, email, phone, address, payment_method, cart, total):
                 status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
+            order_code,
             name,
             email or "",
             phone,
@@ -354,6 +360,7 @@ def create_order(name, email, phone, address, payment_method, cart, total):
 
     finally:
         conn.close()
+
 
 def update_order(order_id, status, message, days):
     conn = connect_db()
