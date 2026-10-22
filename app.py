@@ -653,15 +653,15 @@ with tab_cart:
 
                 else:
                     order_id = create_order(
-                        c_name.strip(),
-                        c_email.strip(),
-                        c_phone.strip(),
-                        c_address.strip(),
-                        payment_method,
-                        st.session_state.cart,
-                        total_price
-                    )
-
+    c_name.strip(),
+    c_email.strip(),
+    c_phone.strip(),
+    address,
+    payment_method,
+    fulfillment,
+    cart,
+    total_price
+)
                     st.session_state.cart = {}
 
                     st.success(
