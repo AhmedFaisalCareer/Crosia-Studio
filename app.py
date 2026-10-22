@@ -315,27 +315,28 @@ def create_order(name, email, phone, address, payment_method, cart, total):
     from datetime import datetime
 
     conn = sqlite3.connect("croshia_store.db")
-    cur = conn.cursor()
 
     try:
+        cur = conn.cursor()
+
         cur.execute("""
-        INSERT INTO orders (
-    customer_name,
-    email,
-    phone,
-    address,
-    payment_method,
-    items_json,
-    total_amount,
-    status,
-    created_at
-)
+            INSERT INTO orders (
+                customer_name,
+                email,
+                phone,
+                address,
+                payment_method,
+                items_json,
+                total_amount,
+                status,
+                created_at
+            )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             name,
-            email,
+            email or "",
             phone,
-            address,
+            address or "Pickup",
             payment_method,
             json.dumps(cart),
             total,
@@ -353,7 +354,6 @@ def create_order(name, email, phone, address, payment_method, cart, total):
 
     finally:
         conn.close()
-
 
 def update_order(order_id, status, message, days):
     conn = connect_db()
