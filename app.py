@@ -308,8 +308,8 @@ def delete_product(product_id):
 
 
 
+
 def create_order(name, email, phone, address, payment_method, cart, total):
-    import uuid
     import json
     import sqlite3
     from datetime import datetime
@@ -317,41 +317,42 @@ def create_order(name, email, phone, address, payment_method, cart, total):
     conn = sqlite3.connect("croshia_store.db")
     cur = conn.cursor()
 
-    order_code = "CR-" + uuid.uuid4().hex[:8].upper()
-
-    cur.execute("""
-        INSERT INTO orders (
-            order_code,
-            customer_name,
+    try:
+        cur.execute("""
+            INSERT INTO orders (
+                customer_name,
+                email,
+                phone,
+                address,
+                payment_method,
+                items_json,
+                total_amount,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            name,
             email,
             phone,
             address,
             payment_method,
-            items,
+            json.dumps(cart),
             total,
-            status,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        order_code,
-        name,
-        email,
-        phone,
-        address,
-        payment_method,
-        json.dumps(cart),
-        total,
-        "New",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ))
+            "New",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
 
-    order_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+        order_id = cur.lastrowid
+        conn.commit()
+        return order_id
 
-    return order_id
+    except Exception:
+        conn.rollback()
+        raise
 
+    finally:
+        conn.close()
 
 
 def update_order(order_id, status, message, days):
