@@ -319,17 +319,17 @@ def create_order(name, email, phone, address, payment_method, cart, total):
 
     try:
         cur.execute("""
-            INSERT INTO orders (
-                customer_name,
-                email,
-                phone,
-                address,
-                payment_method,
-                items_json,
-                total_amount,
-                status,
-                created_at
-            )
+        INSERT INTO orders (
+    customer_name,
+    email,
+    phone,
+    address,
+    payment_method,
+    items_json,
+    total_amount,
+    status,
+    created_at
+)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             name,
