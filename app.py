@@ -307,59 +307,24 @@ def delete_product(product_id):
     conn.close()
 
 
+def create_order(name, email, phone, address,
+                 payment_method, cart, total):
+    conn = connect_db()
 
+    cur = conn.execute("""
+        INSERT INTO orders
+        (customer_name, email, phone, address, payment_method,
+         items_json, total_amount, status, admin_message, delivery_days)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', '', 3)
+    """, (
+        name, email, phone, address, payment_method,
+        json.dumps(cart), total
+    ))
 
-
-def create_order(name, email, phone, address, payment_method, cart, total):
-    import json
-    import sqlite3
-    import uuid
-    from datetime import datetime
-
-    conn = sqlite3.connect("croshia_store.db")
-
-    try:
-        cur = conn.cursor()
-
-        order_code = "CR-" + uuid.uuid4().hex[:8].upper()
-
-        cur.execute("""
-            INSERT INTO orders (
-                order_code,
-                customer_name,
-                email,
-                phone,
-                address,
-                payment_method,
-                items_json,
-                total_amount,
-                status,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            order_code,
-            name,
-            email or "",
-            phone,
-            address or "Pickup",
-            payment_method,
-            json.dumps(cart),
-            total,
-            "New",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ))
-
-        order_id = cur.lastrowid
-        conn.commit()
-        return order_id
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
+    order_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return order_id
 
 
 def update_order(order_id, status, message, days):
@@ -653,15 +618,15 @@ with tab_cart:
 
                 else:
                     order_id = create_order(
-    c_name.strip(),
-    c_email.strip(),
-    c_phone.strip(),
-    address,
-    payment_method,
-    fulfillment,
-    cart,
-    total_price
-)
+                        c_name.strip(),
+                        c_email.strip(),
+                        c_phone.strip(),
+                        c_address.strip(),
+                        payment_method,
+                        st.session_state.cart,
+                        total_price
+                    )
+
                     st.session_state.cart = {}
 
                     st.success(
