@@ -421,10 +421,16 @@ def create_persistent_session(customer_id):
     )
 
 
-def restore_persistent_session():
-    """Validate the browser cookie against the SQLite session table."""
+def restore_persistent_session(browser_cookies=None):
+    """Validate the browser cookie against the SQLite session table.
+
+    On hosted Streamlit, get_all() is important because the cookie component
+    must initialize in the browser before Python can read its cookie values.
+    """
     try:
-        token = cookie_manager.get("croshia_customer_session")
+        if browser_cookies is None:
+            browser_cookies = cookie_manager.get_all()
+        token = (browser_cookies or {}).get("croshia_customer_session")
     except Exception:
         return False
 
@@ -625,12 +631,17 @@ for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
-# CookieManager must be created once per app run before attempting restoration.
+# Create the cookie component and initialize it in the browser.
+# Calling get_all() lets the component load cookie values on Streamlit Cloud.
 cookie_manager = stx.CookieManager(key="croshia_persistent_login_cookie_manager")
+try:
+    browser_cookies = cookie_manager.get_all()
+except Exception:
+    browser_cookies = {}
 
 # On a fresh browser session (including refresh/reopen), restore the saved login.
 if st.session_state.customer is None:
-    restore_persistent_session()
+    restore_persistent_session(browser_cookies)
 
 # ---------------- HEADER / NAVIGATION ----------------
 
