@@ -8,7 +8,8 @@ import hmac
 import html
 import os
 import secrets
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+import extra_streamlit_components as stx
 
 # ---------------- CONFIGURATION ----------------
 
@@ -244,6 +245,19 @@ def init_db():
             )
         """)
 
+        # Stores hashed login tokens so customers can stay signed in
+        # after refreshing or reopening the website.
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS customer_sessions (
+                token_hash TEXT PRIMARY KEY,
+                customer_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(customer_id) REFERENCES customers(id)
+                    ON DELETE CASCADE
+            )
+        """)
+
         con.execute("""
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -370,6 +384,117 @@ def init_db():
 
 
 init_db()
+
+
+# ---------------- PERSISTENT CUSTOMER LOGIN ----------------
+
+def session_token_hash(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_persistent_session(customer_id):
+    """Create a random browser token and store only its hash in SQLite."""
+    token = secrets.token_urlsafe(32)
+    token_hash = session_token_hash(token)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+
+    with db() as con:
+        # Remove older sessions for this customer so a fresh login replaces
+        # the previous browser session. Remove this DELETE if multiple devices
+        # should stay signed in at the same time.
+        con.execute(
+            "DELETE FROM customer_sessions WHERE customer_id=?",
+            (int(customer_id),)
+        )
+        con.execute("""
+            INSERT INTO customer_sessions(token_hash, customer_id, expires_at)
+            VALUES(?,?,?)
+        """, (token_hash, int(customer_id), expires_at.isoformat()))
+
+    # The cookie is HttpOnly where supported by the component/browser,
+    # and its random token has no account details inside it.
+    cookie_manager.set(
+        "croshia_customer_session",
+        token,
+        expires_at=datetime.now() + timedelta(days=30),
+        key="croshia_save_customer_session"
+    )
+
+
+def restore_persistent_session():
+    """Validate the browser cookie against the SQLite session table."""
+    try:
+        token = cookie_manager.get("croshia_customer_session")
+    except Exception:
+        return False
+
+    if not isinstance(token, str) or not token:
+        return False
+
+    token_hash = session_token_hash(token)
+
+    with db() as con:
+        row = con.execute("""
+            SELECT c.id, c.name, c.email, s.expires_at
+            FROM customer_sessions AS s
+            JOIN customers AS c ON c.id=s.customer_id
+            WHERE s.token_hash=?
+        """, (token_hash,)).fetchone()
+
+        if row is None:
+            return False
+
+        try:
+            expires_at = datetime.fromisoformat(row["expires_at"])
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+            if expires_at <= datetime.now(timezone.utc):
+                con.execute(
+                    "DELETE FROM customer_sessions WHERE token_hash=?",
+                    (token_hash,)
+                )
+                return False
+        except (ValueError, TypeError):
+            con.execute(
+                "DELETE FROM customer_sessions WHERE token_hash=?",
+                (token_hash,)
+            )
+            return False
+
+        st.session_state.customer = {
+            "id": int(row["id"]),
+            "name": row["name"],
+            "email": row["email"],
+        }
+
+    st.session_state.guest_mode = False
+    if st.session_state.page == "welcome":
+        st.session_state.page = "shop"
+    return True
+
+
+def end_persistent_session():
+    """Revoke the current login token and remove the browser cookie."""
+    try:
+        token = cookie_manager.get("croshia_customer_session")
+        if isinstance(token, str) and token:
+            with db() as con:
+                con.execute(
+                    "DELETE FROM customer_sessions WHERE token_hash=?",
+                    (session_token_hash(token),)
+                )
+    except Exception:
+        pass
+
+    try:
+        cookie_manager.delete(
+            "croshia_customer_session",
+            key="croshia_delete_customer_session"
+        )
+    except Exception:
+        pass
+
 
 # ---------------- HELPERS ----------------
 
@@ -500,6 +625,13 @@ for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
+# CookieManager must be created once per app run before attempting restoration.
+cookie_manager = stx.CookieManager(key="croshia_persistent_login_cookie_manager")
+
+# On a fresh browser session (including refresh/reopen), restore the saved login.
+if st.session_state.customer is None:
+    restore_persistent_session()
+
 # ---------------- HEADER / NAVIGATION ----------------
 
 store_name = setting("store_name", "Croshia Studio")
@@ -566,6 +698,7 @@ if st.session_state.page == "account":
 
         with col2:
             if st.button("Sign Out", use_container_width=True):
+                end_persistent_session()
                 st.session_state.customer = None
                 st.session_state.cart = {}
                 st.session_state.last_order_code = ""
@@ -609,6 +742,7 @@ if st.session_state.page == "account":
                     }
                     st.session_state.guest_mode = False
                     st.session_state.auth_notice = ""
+                    create_persistent_session(row["id"])
                     go("shop")
                 else:
                     st.error("Email or password is incorrect.")
@@ -655,6 +789,7 @@ if st.session_state.page == "account":
                             "email": signup_email.strip().lower(),
                         }
                         st.session_state.guest_mode = False
+                        create_persistent_session(customer_id)
                         go("shop")
 
                     except sqlite3.IntegrityError:
