@@ -637,7 +637,15 @@ cookie_manager = stx.CookieManager(key="croshia_persistent_login_cookie_manager"
 try:
     browser_cookies = cookie_manager.get_all()
 except Exception:
-    browser_cookies = {}
+    browser_cookies = None
+
+# CookieManager loads browser cookies asynchronously. On its first render,
+# get_all() can return None. Stop this run so the component can finish loading
+# and Streamlit can rerun with the real browser cookie values. Do not treat
+# "not loaded yet" as "customer is logged out".
+if browser_cookies is None:
+    st.info("Loading your saved session…")
+    st.stop()
 
 # On a fresh browser session (including refresh/reopen), restore the saved login.
 if st.session_state.customer is None:
