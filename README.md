@@ -1,33 +1,74 @@
-# Crosia 🛍️
+# 🧶 Croshia Studio
 
-Crosia is an e-commerce app for handmade and customized designs. It allows customers to explore products, add items to their cart, and place orders, while admins can manage products and customer orders.
+Croshia Studio is a handmade crochet shopping and order management application built with Python and Streamlit.
 
-## ✨ Features
-- Browse handmade designs and product images
-- Shopping cart and checkout
-- Customer details and order management
-- Admin dashboard
-- Payment gateway integration support
+## Features
 
-## 🛠️ Tech Stack
+- 🛍️ Browse handmade designs
+- 🛒 Shopping cart and checkout
+- 📦 Customer order tracking
+- 🧾 Admin order management
+- 🎨 Add and edit products
+- 📊 Revenue and inventory dashboard
+- 💳 Payment settings
+- ⚙️ Store configuration
+
+## Tech Stack
+
 - Python
 - Streamlit
-- SQLite
-- Pillow
+- SQLite (local development)
+- Supabase / PostgreSQL (planned for online shared storage)
 
-## 🚀 Installation
+## Project Structure
 
-1. Install dependencies:
+```text
+Croshia-Studio/
+├── app.py
+├── admin_app.py
+├── requirements.txt
+└── README.md
+```
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Run Locally
 
-2. Run the app:
+Install dependencies:
 
-   ```bash
-   streamlit run app.py
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-## 👨‍💻 Developer
-**Ahmed Faisal** — Python & Streamlit Developer
+Start the customer store:
+
+```bash
+python -m streamlit run app.py
+```
+
+Start the admin dashboard in a second terminal:
+
+```bash
+python -m streamlit run admin_app.py --server.port 8502
+```
+
+Customer store: http://localhost:8501
+
+Admin dashboard: http://localhost:8502
+
+## Database
+
+The local development version uses `croshia.db`. Both apps must use the same database file to share orders.
+
+For separate online deployments, configure a shared Supabase database and connect both apps to it.
+
+## Security
+
+- Keep database credentials and API keys private.
+- Change the default admin password before deployment.
+- Never store customers' full card numbers, CVVs, or card PINs.
+- Use a secure payment provider for real online payments.
+
+## Developer
+
+Ahmed Faisal
+
+Built with Python and Streamlit.
