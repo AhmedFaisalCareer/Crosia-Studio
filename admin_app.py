@@ -1,23 +1,15 @@
+
 import os
 import json
 import hmac
-import hashlib
 from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
 from supabase import create_client
-import json
-def order_items(order):
-    items = order.get("items_json", [])
 
-    if isinstance(items, str):
-        try:
-            items = json.loads(items)
-        except (json.JSONDecodeError, TypeError):
-            return []
 
-    return items if isinstance(items, list) else []
+# ---------------- PAGE CONFIG ----------------
 
 st.set_page_config(
     page_title="Croshia Admin Dashboard",
@@ -54,17 +46,17 @@ div[data-testid="stMetric"] {
 
 SUPABASE_URL = st.secrets.get(
     "SUPABASE_URL",
-    os.getenv("SUPABASE_URL", "")
+    os.getenv("SUPABASE_URL", ""),
 )
 
 SUPABASE_KEY = st.secrets.get(
     "SUPABASE_SERVICE_ROLE_KEY",
-    os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
 )
 
 ADMIN_PASSWORD = st.secrets.get(
     "CROSHIA_ADMIN_PASSWORD",
-    os.getenv("CROSHIA_ADMIN_PASSWORD", "")
+    os.getenv("CROSHIA_ADMIN_PASSWORD", ""),
 )
 
 
@@ -79,18 +71,26 @@ def get_supabase():
 
 def db():
     client = get_supabase()
+
     if client is None:
         st.error(
             "Supabase is not configured. Add SUPABASE_URL and "
             "SUPABASE_SERVICE_ROLE_KEY in Streamlit Cloud Secrets."
         )
         st.stop()
+
     return client
 
 
 def read_table(table, limit=1000):
     try:
-        result = db().table(table).select("*").limit(limit).execute()
+        result = (
+            db()
+            .table(table)
+            .select("*")
+            .limit(limit)
+            .execute()
+        )
         return result.data or []
     except Exception as exc:
         st.error(f"Could not load {table}: {exc}")
@@ -134,13 +134,34 @@ def money(value):
 def safe_date(value):
     if not value:
         return "Not set"
+    return str(value)[:10]
+
+
+def order_items(order):
+    """Read the order's items_json whether Supabase returns text or JSON."""
+    items = order.get("items_json", [])
+
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    return items if isinstance(items, list) else []
+
+
+def item_quantity(item):
     try:
-        return str(value)[:10]
-    except Exception:
-        return "Not set"
+        return int(item.get("qty", item.get("quantity", 1)) or 1)
+    except (ValueError, TypeError):
+        return 1
 
 
-
+def item_price(item):
+    try:
+        return float(item.get("price", 0) or 0)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 # ---------------- LOGIN ----------------
@@ -151,7 +172,7 @@ if "croshia_admin_ok" not in st.session_state:
 if not ADMIN_PASSWORD:
     st.error(
         "Admin password is missing. Add CROSHIA_ADMIN_PASSWORD "
-        "to Streamlit Cloud Secrets before using this dashboard."
+        "to Streamlit Cloud Secrets."
     )
     st.stop()
 
@@ -164,7 +185,10 @@ if not st.session_state["croshia_admin_ok"]:
 
     with st.form("admin_login"):
         password = st.text_input("Admin password", type="password")
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+        submitted = st.form_submit_button(
+            "Sign in",
+            use_container_width=True,
+        )
 
     if submitted:
         if hmac.compare_digest(password, ADMIN_PASSWORD):
@@ -193,7 +217,6 @@ page = st.sidebar.radio(
 )
 
 if st.sidebar.button("Refresh dashboard", use_container_width=True):
-    st.cache_resource.clear()
     st.rerun()
 
 if st.sidebar.button("Log out", use_container_width=True):
@@ -208,54 +231,39 @@ products = read_table("products")
 customers = read_table("customers")
 settings_rows = read_table("settings")
 
-orders_df = pd.DataFrame(orders)
-products_df = pd.DataFrame(products)
-customers_df = pd.DataFrame(customers)
-
 
 # ---------------- OVERVIEW ----------------
 
 if page == "Overview":
     st.title("Dashboard Overview")
-    st.caption(f"Last refreshed: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+    st.caption(
+        f"Last refreshed: {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
+    )
 
     total_orders = len(orders)
-    new_orders = sum(1 for o in orders if str(o.get("status", "")).lower() == "new")
-    completed_orders = sum(
-        1 for o in orders
-        if str(o.get("status", "")).lower() == "completed"
+
+    new_orders = sum(
+        1 for order in orders
+        if str(order.get("status", "")).lower() == "new"
     )
+
+    completed_orders = sum(
+        1 for order in orders
+        if str(order.get("status", "")).lower() == "completed"
+    )
+
     total_customers = len(customers)
-    active_products = sum(1 for p in products if p.get("active", True))
+
+    active_products = sum(
+        1 for product in products
+        if product.get("active", True)
+    )
 
     completed_sales = sum(
-        float(o.get("total_amount") or 0)
-        for o in orders
-        if str(o.get("status", "")).lower() == "completed"
+        float(order.get("total_amount") or 0)
+        for order in orders
+        if str(order.get("status", "")).lower() == "completed"
     )
-
-    total_cost = 0
-    for order in orders:
-        if str(order.get("status", "")).lower() != "completed":
-            continue
-
-        items = order_items(order)
-        if isinstance(items, list):
-            for item in items:
-                try:
-                    qty = int(item.get("quantity", item.get("qty", 1)))
-                    product_id = item.get("product_id", item.get("id"))
-                    product = next(
-                        (
-                            p for p in products
-                            if str(p.get("id")) == str(product_id)
-                        ),
-                        None,
-                    )
-                    if product:
-                        total_cost += float(product.get("cost") or 0) * qty
-                except Exception:
-                    pass
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Orders", total_orders)
@@ -273,19 +281,20 @@ if page == "Overview":
     if orders:
         recent = sorted(
             orders,
-            key=lambda o: str(o.get("created_at", "")),
+            key=lambda order: str(order.get("created_at", "")),
             reverse=True,
         )[:10]
 
-        recent_data = []
-        for order in recent:
-            recent_data.append({
-                "Order Code": order.get("order_code", ""),
+        recent_data = [
+            {
+                "Order Code": order.get("order_code") or order.get("id", ""),
                 "Customer": order.get("customer_name", ""),
                 "Total": money(order.get("total_amount")),
                 "Status": order.get("status", "New"),
                 "Date": safe_date(order.get("created_at")),
-            })
+            }
+            for order in recent
+        ]
 
         st.dataframe(
             pd.DataFrame(recent_data),
@@ -296,17 +305,19 @@ if page == "Overview":
         st.info("No orders have been received yet.")
 
     st.subheader("Inventory")
+
     if products:
         inventory = [
             {
-                "Product": p.get("name", ""),
-                "Category": p.get("category", ""),
-                "Price": money(p.get("price")),
-                "Stock": p.get("stock", 0),
-                "Active": p.get("active", True),
+                "Product": product.get("name", ""),
+                "Category": product.get("category", ""),
+                "Price": money(product.get("price")),
+                "Stock": product.get("stock", 0),
+                "Active": product.get("active", True),
             }
-            for p in products
+            for product in products
         ]
+
         st.dataframe(
             pd.DataFrame(inventory),
             use_container_width=True,
@@ -330,27 +341,32 @@ elif page == "Orders":
 
     if search.strip():
         term = search.strip().lower()
+
         filtered_orders = [
-            o for o in orders
-            if term in str(o.get("order_code", "")).lower()
-            or term in str(o.get("customer_name", "")).lower()
-            or term in str(o.get("email", "")).lower()
-            or term in str(o.get("phone", "")).lower()
+            order for order in orders
+            if term in str(order.get("order_code", "")).lower()
+            or term in str(order.get("customer_name", "")).lower()
+            or term in str(order.get("email", "")).lower()
+            or term in str(order.get("phone", "")).lower()
         ]
 
     if not filtered_orders:
         st.info("No matching orders found.")
+
     else:
-        for order in sorted(
+        sorted_orders = sorted(
             filtered_orders,
-            key=lambda o: str(o.get("created_at", "")),
+            key=lambda order: str(order.get("created_at", "")),
             reverse=True,
-        ):
+        )
+
+        for order in sorted_orders:
             order_id = order.get("id")
             order_code = order.get("order_code") or str(order_id)
 
             with st.expander(
-                f"{order_code} — {order.get('customer_name', 'Customer')} — "
+                f"{order_code} — "
+                f"{order.get('customer_name', 'Customer')} — "
                 f"{money(order.get('total_amount'))}"
             ):
                 left, right = st.columns(2)
@@ -360,54 +376,65 @@ elif page == "Orders":
                     st.write(f"**Email:** {order.get('email', '')}")
                     st.write(f"**Phone:** {order.get('phone', '')}")
                     st.write(f"**Fulfillment:** {order.get('fulfillment', '')}")
-                    st.write(f"**Address:** {order.get('address', '') or 'Not provided'}")
-                    st.write(f"**Pickup details:** {order.get('pickup_note', '') or 'Not provided'}")
+                    st.write(
+                        f"**Address:** "
+                        f"{order.get('address', '') or 'Not provided'}"
+                    )
+                    st.write(
+                        f"**Pickup details:** "
+                        f"{order.get('pickup_note', '') or 'Not provided'}"
+                    )
 
                 with right:
                     st.write(f"**Subtotal:** {money(order.get('subtotal'))}")
-                    st.write(f"**Delivery fee:** {money(order.get('delivery_fee'))}")
-                    st.write(f"**Total:** {money(order.get('total_amount'))}")
-                    st.write(f"**Payment method:** {order.get('payment_method', '')}")
-                    st.write(f"**Payment status:** {order.get('payment_status', 'Pending')}")
-                    st.write(f"**Order date:** {safe_date(order.get('created_at'))}")
+                    st.write(
+                        f"**Delivery fee:** {money(order.get('delivery_fee'))}"
+                    )
+                    st.write(
+                        f"**Total:** {money(order.get('total_amount'))}"
+                    )
+                    st.write(
+                        f"**Payment method:** "
+                        f"{order.get('payment_method', '')}"
+                    )
+                    st.write(
+                        f"**Payment status:** "
+                        f"{order.get('payment_status', 'Pending')}"
+                    )
+                    st.write(
+                        f"**Order date:** {safe_date(order.get('created_at'))}"
+                    )
 
-               
-st.write("**Order Items**")
+                # Readable order item table
+                st.write("### Order Items")
 
-items = order_items(order)
+                items = order_items(order)
+                item_rows = []
 
-if isinstance(items, list) and items:
-    item_rows = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
 
-    for item in items:
-        if isinstance(item, dict):
-            quantity = int(item.get("qty", item.get("quantity", 1)))
-            price = float(item.get("price", 0) or 0)
+                    quantity = item_quantity(item)
+                    price = item_price(item)
 
-            item_rows.append({
-                "Product": item.get("name", "Unknown Product"),
-                "Quantity": quantity,
-                "Price per Item": f"PKR {price:,.0f}",
-                "Subtotal": f"PKR {price * quantity:,.0f}",
-            })
+                    item_rows.append({
+                        "Product": item.get("name", "Unknown Product"),
+                        "Quantity": quantity,
+                        "Price per Item": money(price),
+                        "Subtotal": money(price * quantity),
+                    })
 
-    if item_rows:
-        st.dataframe(
-            item_rows,
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No readable item details found.")
- 
-elif items:
-             st.write(items)
+                if item_rows:
+                    st.dataframe(
+                        pd.DataFrame(item_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("No readable item details found for this order.")
 
-else:
-        st.info("No item details saved.")
-
-
-statuses = [
+                statuses = [
                     "New",
                     "Discussing",
                     "In Progress",
@@ -416,22 +443,23 @@ statuses = [
                     "Cancelled",
                 ]
 
-payment_statuses = [
+                payment_statuses = [
                     "Pending",
                     "Paid",
                     "Failed",
                     "Refunded",
                 ]
 
-current_status = order.get("status", "New")
-current_payment = order.get("payment_status", "Pending")
+                current_status = order.get("status") or "New"
+                current_payment = order.get("payment_status") or "Pending"
 
-if current_status not in statuses:
+                if current_status not in statuses:
                     current_status = "New"
-if current_payment not in payment_statuses:
+
+                if current_payment not in payment_statuses:
                     current_payment = "Pending"
 
-with st.form(f"order_form_{order_id}"):
+                with st.form(f"order_form_{order_id}"):
                     new_status = st.selectbox(
                         "Order status",
                         statuses,
@@ -447,7 +475,9 @@ with st.form(f"order_form_{order_id}"):
                     admin_message = st.text_area(
                         "Message for customer",
                         value=order.get("admin_message") or "",
-                        placeholder="Example: Your handmade order will be ready in 5 days.",
+                        placeholder=(
+                            "Example: Your handmade order will be ready in 5 days."
+                        ),
                     )
 
                     expected_date = st.text_input(
@@ -460,7 +490,7 @@ with st.form(f"order_form_{order_id}"):
                         use_container_width=True,
                     )
 
-if save_order:
+                if save_order:
                     if expected_date.strip():
                         try:
                             date.fromisoformat(expected_date.strip())
@@ -480,7 +510,7 @@ if save_order:
                     )
 
                     if updated:
-                        st.success("Order updated.")
+                        st.success("Order updated successfully.")
                         st.rerun()
 
 
@@ -492,6 +522,7 @@ elif page == "Products":
     with st.expander("➕ Add a new product", expanded=not products):
         with st.form("add_product_form", clear_on_submit=True):
             name = st.text_input("Product name")
+
             category = st.selectbox(
                 "Category",
                 [
@@ -504,12 +535,28 @@ elif page == "Products":
                     "Other",
                 ],
             )
+
             description = st.text_area("Description")
-            price = st.number_input("Selling price (PKR)", min_value=0.0, step=50.0)
-            cost = st.number_input("Estimated cost (PKR)", min_value=0.0, step=50.0)
-            stock = st.number_input("Stock quantity", min_value=0, step=1)
+            price = st.number_input(
+                "Selling price (PKR)",
+                min_value=0.0,
+                step=50.0,
+            )
+            cost = st.number_input(
+                "Estimated cost (PKR)",
+                min_value=0.0,
+                step=50.0,
+            )
+            stock = st.number_input(
+                "Stock quantity",
+                min_value=0,
+                step=1,
+            )
             image_url = st.text_input("Image URL (optional)")
-            active = st.checkbox("Visible in customer store", value=True)
+            active = st.checkbox(
+                "Visible in customer store",
+                value=True,
+            )
 
             add_product = st.form_submit_button(
                 "Add product",
@@ -533,8 +580,9 @@ elif page == "Products":
                         "active": bool(active),
                     },
                 )
+
                 if success:
-                    st.success("Product added.")
+                    st.success("Product added successfully.")
                     st.rerun()
 
     st.divider()
@@ -542,6 +590,7 @@ elif page == "Products":
 
     if not products:
         st.info("No products have been added yet.")
+
     else:
         for product in products:
             product_id = product.get("id")
@@ -558,36 +607,43 @@ elif page == "Products":
                         "Product name",
                         value=product.get("name") or "",
                     )
+
                     p_category = st.text_input(
                         "Category",
                         value=product.get("category") or "",
                     )
+
                     p_description = st.text_area(
                         "Description",
                         value=product.get("description") or "",
                     )
+
                     p_price = st.number_input(
                         "Price (PKR)",
                         min_value=0.0,
                         value=float(product.get("price") or 0),
                         step=50.0,
                     )
+
                     p_cost = st.number_input(
                         "Estimated cost (PKR)",
                         min_value=0.0,
                         value=float(product.get("cost") or 0),
                         step=50.0,
                     )
+
                     p_stock = st.number_input(
                         "Stock",
                         min_value=0,
                         value=int(product.get("stock") or 0),
                         step=1,
                     )
+
                     p_image = st.text_input(
                         "Image URL",
                         value=product.get("image_url") or "",
                     )
+
                     p_active = st.checkbox(
                         "Visible in customer store",
                         value=bool(product.get("active", True)),
@@ -616,13 +672,18 @@ elif page == "Products":
                                 "active": bool(p_active),
                             },
                         )
+
                         if success:
-                            st.success("Product updated.")
+                            st.success("Product updated successfully.")
                             st.rerun()
 
+                estimated_profit = (
+                    float(product.get("price") or 0)
+                    - float(product.get("cost") or 0)
+                )
+
                 st.caption(
-                    f"Estimated profit per item: "
-                    f"{money(float(product.get('price') or 0) - float(product.get('cost') or 0))}"
+                    f"Estimated profit per item: {money(estimated_profit)}"
                 )
 
                 if st.button(
@@ -641,16 +702,17 @@ elif page == "Customers":
     st.title("Customer Management")
 
     if customers:
-        display_customers = [
+        customer_data = [
             {
-                "Name": c.get("name", ""),
-                "Email": c.get("email", ""),
-                "Created": safe_date(c.get("created_at")),
+                "Name": customer.get("name", ""),
+                "Email": customer.get("email", ""),
+                "Created": safe_date(customer.get("created_at")),
             }
-            for c in customers
+            for customer in customers
         ]
 
-        customer_df = pd.DataFrame(display_customers)
+        customer_df = pd.DataFrame(customer_data)
+
         st.dataframe(
             customer_df,
             use_container_width=True,
@@ -681,7 +743,9 @@ elif page == "Settings":
 
     def setting_value(key, default=""):
         row = settings_map.get(key)
-        return str(row.get("value", default)) if row else str(default)
+        if row:
+            return str(row.get("value", default))
+        return str(default)
 
     with st.form("store_settings_form"):
         store_name = st.text_input(
@@ -691,14 +755,17 @@ elif page == "Settings":
 
         about = st.text_area(
             "Store description",
-            value=setting_value("about", "Handmade crochet designs made with care."),
+            value=setting_value(
+                "about",
+                "Handmade crochet designs made with care.",
+            ),
         )
 
         try:
             delivery_fee_default = float(
                 setting_value("delivery_fee", "150")
             )
-        except ValueError:
+        except (ValueError, TypeError):
             delivery_fee_default = 150.0
 
         delivery_fee = st.number_input(
@@ -710,12 +777,18 @@ elif page == "Settings":
 
         delivery_enabled = st.checkbox(
             "Enable delivery",
-            value=setting_value("delivery_enabled", "true").lower() == "true",
+            value=setting_value(
+                "delivery_enabled",
+                "true",
+            ).lower() == "true",
         )
 
         pickup_enabled = st.checkbox(
             "Enable pickup",
-            value=setting_value("pickup_enabled", "true").lower() == "true",
+            value=setting_value(
+                "pickup_enabled",
+                "true",
+            ).lower() == "true",
         )
 
         pickup_note = st.text_area(
@@ -745,13 +818,21 @@ elif page == "Settings":
 
             try:
                 if existing:
-                    db().table("settings").update(
-                        {"value": value}
-                    ).eq("key", key).execute()
+                    (
+                        db()
+                        .table("settings")
+                        .update({"value": value})
+                        .eq("key", key)
+                        .execute()
+                    )
                 else:
-                    db().table("settings").insert(
-                        {"key": key, "value": value}
-                    ).execute()
+                    (
+                        db()
+                        .table("settings")
+                        .insert({"key": key, "value": value})
+                        .execute()
+                    )
+
             except Exception as exc:
                 failed = True
                 st.error(f"Could not save setting '{key}': {exc}")
@@ -768,7 +849,6 @@ elif page == "Settings":
     st.write("Customers loaded:", len(customers))
 
     st.warning(
-        "Keep your SUPABASE_SERVICE_ROLE_KEY private. "
+        "Keep SUPABASE_SERVICE_ROLE_KEY private. "
         "Never place it in public code or share it with customers."
     )
-    
