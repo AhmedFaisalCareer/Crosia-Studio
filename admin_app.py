@@ -8,6 +8,16 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 import json
+def order_items(order):
+    items = order.get("items_json", [])
+
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    return items if isinstance(items, list) else []
 
 st.set_page_config(
     page_title="Croshia Admin Dashboard",
@@ -770,3 +780,4 @@ elif page == "Settings":
         "Keep your SUPABASE_SERVICE_ROLE_KEY private. "
         "Never place it in public code or share it with customers."
     )
+    
