@@ -8,7 +8,6 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-
 st.set_page_config(
     page_title="Croshia Admin Dashboard",
     page_icon="🧶",
@@ -129,6 +128,17 @@ def safe_date(value):
     except Exception:
         return "Not set"
 
+
+def order_items(order):
+    items = order.get("items_json", [])
+
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    return items if isinstance(items, list) else []
 
 def order_items(order):
     items = order.get("items_json", [])
