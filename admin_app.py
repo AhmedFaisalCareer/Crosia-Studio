@@ -140,16 +140,7 @@ def safe_date(value):
         return "Not set"
 
 
-def order_items(order):
-    items = order.get("items_json", [])
 
-    if isinstance(items, str):
-        try:
-            items = json.loads(items)
-        except (json.JSONDecodeError, TypeError):
-            return []
-
-    return items if isinstance(items, list) else []
 
 
 # ---------------- LOGIN ----------------
