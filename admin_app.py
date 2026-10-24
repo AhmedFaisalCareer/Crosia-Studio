@@ -368,17 +368,43 @@ elif page == "Orders":
                     st.write(f"**Payment status:** {order.get('payment_status', 'Pending')}")
                     st.write(f"**Order date:** {safe_date(order.get('created_at'))}")
 
-                st.write("**Items**")
-                items = order_items(order)
-                if items:
-                    if isinstance(items, list):
-                        st.json(items)
-                    else:
-                        st.write(items)
-                else:
-                    st.write("No item details saved.")
+               
+st.write("**Order Items**")
 
-                statuses = [
+items = order_items(order)
+
+if isinstance(items, list) and items:
+    item_rows = []
+
+    for item in items:
+        if isinstance(item, dict):
+            quantity = int(item.get("qty", item.get("quantity", 1)))
+            price = float(item.get("price", 0) or 0)
+
+            item_rows.append({
+                "Product": item.get("name", "Unknown Product"),
+                "Quantity": quantity,
+                "Price per Item": f"PKR {price:,.0f}",
+                "Subtotal": f"PKR {price * quantity:,.0f}",
+            })
+
+    if item_rows:
+        st.dataframe(
+            item_rows,
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No readable item details found.")
+ 
+elif items:
+             st.write(items)
+
+else:
+        st.info("No item details saved.")
+
+
+statuses = [
                     "New",
                     "Discussing",
                     "In Progress",
@@ -387,22 +413,22 @@ elif page == "Orders":
                     "Cancelled",
                 ]
 
-                payment_statuses = [
+payment_statuses = [
                     "Pending",
                     "Paid",
                     "Failed",
                     "Refunded",
                 ]
 
-                current_status = order.get("status", "New")
-                current_payment = order.get("payment_status", "Pending")
+current_status = order.get("status", "New")
+current_payment = order.get("payment_status", "Pending")
 
-                if current_status not in statuses:
+if current_status not in statuses:
                     current_status = "New"
-                if current_payment not in payment_statuses:
+if current_payment not in payment_statuses:
                     current_payment = "Pending"
 
-                with st.form(f"order_form_{order_id}"):
+with st.form(f"order_form_{order_id}"):
                     new_status = st.selectbox(
                         "Order status",
                         statuses,
@@ -431,7 +457,7 @@ elif page == "Orders":
                         use_container_width=True,
                     )
 
-                if save_order:
+if save_order:
                     if expected_date.strip():
                         try:
                             date.fromisoformat(expected_date.strip())
