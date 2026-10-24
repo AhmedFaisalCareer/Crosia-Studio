@@ -1,22 +1,16 @@
 import os
 import json
 import hmac
-import sqlite3
-from pathlib import Path
-from datetime import datetime
+import hashlib
+from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
+from supabase import create_client
 
-# Croshia Studio Admin Dashboard
-# IMPORTANT: This SQLite version works only when it can access the SAME croshia.db
-# file as the customer app. Separate Streamlit Cloud deployments do not share files.
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.getenv("CROSHIA_DB_PATH", str(BASE_DIR / "croshia.db")))
-ADMIN_PASSWORD = os.getenv("CROSHIA_ADMIN_PASSWORD", "change-this-password")
 
 st.set_page_config(
-    page_title="Croshia Studio | Admin",
+    page_title="Croshia Admin Dashboard",
     page_icon="🧶",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -24,301 +18,727 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap');
-.stApp {background:#FFFAF6;color:#332A31;font-family:'DM Sans',sans-serif}
-h1,h2,h3 {font-family:'Playfair Display',serif!important}
-h1 {color:#985B75!important}
-.block-container {max-width:1400px;padding-top:1.5rem;padding-bottom:3rem}
-div.stButton>button,div.stFormSubmitButton>button {border-radius:10px;font-weight:650;min-height:2.5rem}
-div.stButton>button[kind="primary"],div.stFormSubmitButton>button[kind="primary"] {background:#985B75;color:white;border:0}
-[data-testid="stMetric"] {background:#fff;border:1px solid #EFDEE5;padding:14px;border-radius:14px}
-.admin-hero {background:linear-gradient(115deg,#F3DFE7,#FFF5ED);padding:24px;border-radius:18px;margin:8px 0 20px}
-.small-note {color:#725F68;font-size:.9rem}
+.stApp {
+    background: #fffaf7;
+}
+section[data-testid="stSidebar"] {
+    background: #f8e8e5;
+}
+h1, h2, h3 {
+    color: #793f51;
+}
+div[data-testid="stMetric"] {
+    background: white;
+    border: 1px solid #f0d9d5;
+    padding: 16px;
+    border-radius: 12px;
+}
+.stButton > button {
+    border-radius: 8px;
+}
 </style>
 """, unsafe_allow_html=True)
 
 
-def connect():
-    con = sqlite3.connect(str(DB_PATH), timeout=20)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=20000")
-    return con
+# ---------------- CONFIGURATION ----------------
+
+SUPABASE_URL = st.secrets.get(
+    "SUPABASE_URL",
+    os.getenv("SUPABASE_URL", "")
+)
+
+SUPABASE_KEY = st.secrets.get(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+)
+
+ADMIN_PASSWORD = st.secrets.get(
+    "CROSHIA_ADMIN_PASSWORD",
+    os.getenv("CROSHIA_ADMIN_PASSWORD", "")
+)
 
 
-def tables_available():
-    if not DB_PATH.exists():
-        return set()
-    with connect() as con:
-        return {r["name"] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
+# ---------------- DATABASE ----------------
+
+@st.cache_resource
+def get_supabase():
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def columns(table):
-    with connect() as con:
-        return {r["name"] for r in con.execute(f'PRAGMA table_info("{table}")').fetchall()}
+def db():
+    client = get_supabase()
+    if client is None:
+        st.error(
+            "Supabase is not configured. Add SUPABASE_URL and "
+            "SUPABASE_SERVICE_ROLE_KEY in Streamlit Cloud Secrets."
+        )
+        st.stop()
+    return client
 
 
-def safe_df(sql, params=()):
-    with connect() as con:
-        return pd.read_sql_query(sql, con, params=params)
+def read_table(table, limit=1000):
+    try:
+        result = db().table(table).select("*").limit(limit).execute()
+        return result.data or []
+    except Exception as exc:
+        st.error(f"Could not load {table}: {exc}")
+        return []
+
+
+def update_row(table, row_id, values):
+    try:
+        db().table(table).update(values).eq("id", row_id).execute()
+        return True
+    except Exception as exc:
+        st.error(f"Could not update {table}: {exc}")
+        return False
+
+
+def insert_row(table, values):
+    try:
+        db().table(table).insert(values).execute()
+        return True
+    except Exception as exc:
+        st.error(f"Could not add record to {table}: {exc}")
+        return False
+
+
+def delete_row(table, row_id):
+    try:
+        db().table(table).delete().eq("id", row_id).execute()
+        return True
+    except Exception as exc:
+        st.error(f"Could not delete record from {table}: {exc}")
+        return False
 
 
 def money(value):
     try:
         return f"PKR {float(value or 0):,.0f}"
-    except (TypeError, ValueError):
+    except (ValueError, TypeError):
         return "PKR 0"
 
 
-def set_order_fields(order_id, status, payment_status, admin_message, expected_date):
-    cols = columns("orders")
-    updates, values = [], []
-    if "status" in cols:
-        updates.append('"status"=?'); values.append(status)
-    elif "order_status" in cols:
-        updates.append('"order_status"=?'); values.append(status)
-    if "payment_status" in cols:
-        updates.append('"payment_status"=?'); values.append(payment_status)
-    if "admin_message" in cols:
-        updates.append('"admin_message"=?'); values.append(admin_message.strip())
-    if "expected_date" in cols:
-        updates.append('"expected_date"=?'); values.append(expected_date.strip())
-    elif "estimated_days" in cols:
+def safe_date(value):
+    if not value:
+        return "Not set"
+    try:
+        return str(value)[:10]
+    except Exception:
+        return "Not set"
+
+
+def order_items(order):
+    items = order.get("items_json", [])
+    if isinstance(items, str):
         try:
-            days = max(1, int(expected_date))
-        except (TypeError, ValueError):
-            days = 7
-        updates.append('"estimated_days"=?'); values.append(days)
-    if "updated_at" in cols:
-        updates.append('"updated_at"=?'); values.append(datetime.now().isoformat(timespec="seconds"))
-    if not updates:
-        return
-    values.append(order_id)
-    with connect() as con:
-        con.execute(f'UPDATE orders SET {", ".join(updates)} WHERE id=?', values)
-        con.commit()
+            items = json.loads(items)
+        except Exception:
+            return items
+    return items
 
 
-def login():
-    st.markdown('<div class="admin-hero"><h1>🧶 Croshia Studio</h1><p>Private store management dashboard</p></div>', unsafe_allow_html=True)
-    st.subheader("Admin sign in")
+# ---------------- LOGIN ----------------
+
+if "croshia_admin_ok" not in st.session_state:
+    st.session_state["croshia_admin_ok"] = False
+
+if not ADMIN_PASSWORD:
+    st.error(
+        "Admin password is missing. Add CROSHIA_ADMIN_PASSWORD "
+        "to Streamlit Cloud Secrets before using this dashboard."
+    )
+    st.stop()
+
+if not st.session_state["croshia_admin_ok"]:
+    st.markdown(
+        "<h1 style='text-align:center;'>🧶 Croshia Studio</h1>"
+        "<p style='text-align:center;'>Admin Dashboard</p>",
+        unsafe_allow_html=True,
+    )
+
     with st.form("admin_login"):
         password = st.text_input("Admin password", type="password")
-        submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Sign in", use_container_width=True)
+
     if submitted:
-        if ADMIN_PASSWORD == "change-this-password":
-            st.error("Set CROSHIA_ADMIN_PASSWORD in your deployment secrets/environment before using this dashboard.")
-        elif hmac.compare_digest(password, ADMIN_PASSWORD):
+        if hmac.compare_digest(password, ADMIN_PASSWORD):
             st.session_state["croshia_admin_ok"] = True
             st.rerun()
         else:
             st.error("Incorrect password.")
 
+    st.stop()
 
-if "croshia_admin_ok" not in st.session_state:
+
+# ---------------- SIDEBAR ----------------
+
+st.sidebar.title("🧶 Croshia Studio")
+st.sidebar.caption("Admin Management")
+
+page = st.sidebar.radio(
+    "Navigation",
+    [
+        "Overview",
+        "Orders",
+        "Products",
+        "Customers",
+        "Settings",
+    ],
+)
+
+if st.sidebar.button("Refresh dashboard", use_container_width=True):
+    st.cache_resource.clear()
+    st.rerun()
+
+if st.sidebar.button("Log out", use_container_width=True):
     st.session_state["croshia_admin_ok"] = False
+    st.rerun()
 
-if not st.session_state["croshia_admin_ok"]:
-    login()
-    st.stop()
 
-with st.sidebar:
-    st.markdown("## 🧶 Croshia Admin")
-    st.caption("Handmade store management")
-    page = st.radio("Navigate", ["Overview", "Orders", "Products", "Customers", "Settings"])
-    if st.button("Sign out", use_container_width=True):
-        st.session_state["croshia_admin_ok"] = False
-        st.rerun()
+# ---------------- LOAD DATA ----------------
 
-st.title(page)
+orders = read_table("orders")
+products = read_table("products")
+customers = read_table("customers")
+settings_rows = read_table("settings")
 
-available = tables_available()
-required = {"orders", "products"}
-if not DB_PATH.exists() or not required.issubset(available):
-    st.error(f"Database not found or missing tables: {DB_PATH}")
-    st.warning(
-        "This app needs the same croshia.db file used by the customer app. "
-        "It will not see data from a separate Streamlit Cloud deployment's local SQLite database."
-    )
-    st.stop()
+orders_df = pd.DataFrame(orders)
+products_df = pd.DataFrame(products)
+customers_df = pd.DataFrame(customers)
 
-order_cols = columns("orders")
-product_cols = columns("products")
+
+# ---------------- OVERVIEW ----------------
 
 if page == "Overview":
-    orders = safe_df("SELECT * FROM orders ORDER BY id DESC")
-    products = safe_df("SELECT * FROM products")
-    customers = safe_df("SELECT * FROM customers") if "customers" in available else pd.DataFrame()
-    status_col = "status" if "status" in orders.columns else ("order_status" if "order_status" in orders.columns else None)
-    total_col = "total_amount" if "total_amount" in orders.columns else ("total" if "total" in orders.columns else None)
-    completed = orders[orders[status_col].astype(str).str.lower().eq("completed")] if status_col and not orders.empty else orders.iloc[0:0]
-    revenue = completed[total_col].sum() if total_col and not completed.empty else 0
-    active_count = int((~orders[status_col].astype(str).str.lower().isin(["completed", "cancelled"])).sum()) if status_col and not orders.empty else 0
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total orders", len(orders))
-    c2.metric("Active orders", active_count)
-    c3.metric("Completed orders", len(completed))
-    c4.metric("Completed sales", money(revenue))
-    st.caption("Sales count as revenue only when an order is marked Completed. Profit depends on the product costs you enter.")
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Recent orders")
-        if not orders.empty:
-            display_cols = [c for c in ["order_code", "customer_name", "email", status_col, total_col, "created_at"] if c and c in orders.columns]
-            st.dataframe(orders[display_cols].head(8), use_container_width=True, hide_index=True)
-        else:
-            st.info("No orders yet.")
-    with right:
-        st.subheader("Products and stock")
-        if not products.empty:
-            display_cols = [c for c in ["name", "category", "price", "stock", "active"] if c in products.columns]
-            st.dataframe(products[display_cols].head(10), use_container_width=True, hide_index=True)
-        else:
-            st.info("No products found.")
+    st.title("Dashboard Overview")
+    st.caption(f"Last refreshed: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+
+    total_orders = len(orders)
+    new_orders = sum(1 for o in orders if str(o.get("status", "")).lower() == "new")
+    completed_orders = sum(
+        1 for o in orders
+        if str(o.get("status", "")).lower() == "completed"
+    )
+    total_customers = len(customers)
+    active_products = sum(1 for p in products if p.get("active", True))
+
+    completed_sales = sum(
+        float(o.get("total_amount") or 0)
+        for o in orders
+        if str(o.get("status", "")).lower() == "completed"
+    )
+
+    total_cost = 0
+    for order in orders:
+        if str(order.get("status", "")).lower() != "completed":
+            continue
+
+        items = order_items(order)
+        if isinstance(items, list):
+            for item in items:
+                try:
+                    qty = int(item.get("quantity", item.get("qty", 1)))
+                    product_id = item.get("product_id", item.get("id"))
+                    product = next(
+                        (
+                            p for p in products
+                            if str(p.get("id")) == str(product_id)
+                        ),
+                        None,
+                    )
+                    if product:
+                        total_cost += float(product.get("cost") or 0) * qty
+                except Exception:
+                    pass
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Orders", total_orders)
+    col2.metric("New Orders", new_orders)
+    col3.metric("Completed Orders", completed_orders)
+
+    col4, col5, col6 = st.columns(3)
+    col4.metric("Completed Sales", money(completed_sales))
+    col5.metric("Registered Customers", total_customers)
+    col6.metric("Active Products", active_products)
+
+    st.divider()
+    st.subheader("Recent Orders")
+
+    if orders:
+        recent = sorted(
+            orders,
+            key=lambda o: str(o.get("created_at", "")),
+            reverse=True,
+        )[:10]
+
+        recent_data = []
+        for order in recent:
+            recent_data.append({
+                "Order Code": order.get("order_code", ""),
+                "Customer": order.get("customer_name", ""),
+                "Total": money(order.get("total_amount")),
+                "Status": order.get("status", "New"),
+                "Date": safe_date(order.get("created_at")),
+            })
+
+        st.dataframe(
+            pd.DataFrame(recent_data),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No orders have been received yet.")
+
+    st.subheader("Inventory")
+    if products:
+        inventory = [
+            {
+                "Product": p.get("name", ""),
+                "Category": p.get("category", ""),
+                "Price": money(p.get("price")),
+                "Stock": p.get("stock", 0),
+                "Active": p.get("active", True),
+            }
+            for p in products
+        ]
+        st.dataframe(
+            pd.DataFrame(inventory),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Add products from the Products section.")
+
+
+# ---------------- ORDERS ----------------
 
 elif page == "Orders":
-    orders = safe_df("SELECT * FROM orders ORDER BY id DESC")
-    if orders.empty:
-        st.info("No orders have been placed yet.")
+    st.title("Order Management")
+
+    search = st.text_input(
+        "Search orders",
+        placeholder="Order code, customer, email, or phone",
+    )
+
+    filtered_orders = orders
+
+    if search.strip():
+        term = search.strip().lower()
+        filtered_orders = [
+            o for o in orders
+            if term in str(o.get("order_code", "")).lower()
+            or term in str(o.get("customer_name", "")).lower()
+            or term in str(o.get("email", "")).lower()
+            or term in str(o.get("phone", "")).lower()
+        ]
+
+    if not filtered_orders:
+        st.info("No matching orders found.")
     else:
-        search = st.text_input("Search by order code, customer, email, or phone")
-        if search:
-            mask = pd.Series(False, index=orders.index)
-            for col in ["order_code", "customer_name", "email", "phone"]:
-                if col in orders.columns:
-                    mask |= orders[col].fillna("").astype(str).str.contains(search, case=False, regex=False)
-            orders = orders[mask]
-        status_col = "status" if "status" in orders.columns else ("order_status" if "order_status" in orders.columns else None)
-        for _, order in orders.iterrows():
-            order_id = int(order["id"])
-            code = str(order.get("order_code", f"#{order_id}"))
-            with st.expander(f"{code} · {order.get('customer_name', 'Customer')} · {money(order.get('total_amount', order.get('total', 0)))}"):
-                a, b = st.columns(2)
-                with a:
+        for order in sorted(
+            filtered_orders,
+            key=lambda o: str(o.get("created_at", "")),
+            reverse=True,
+        ):
+            order_id = order.get("id")
+            order_code = order.get("order_code") or str(order_id)
+
+            with st.expander(
+                f"{order_code} — {order.get('customer_name', 'Customer')} — "
+                f"{money(order.get('total_amount'))}"
+            ):
+                left, right = st.columns(2)
+
+                with left:
                     st.write(f"**Customer:** {order.get('customer_name', '')}")
                     st.write(f"**Email:** {order.get('email', '')}")
                     st.write(f"**Phone:** {order.get('phone', '')}")
-                    st.write(f"**Fulfilment:** {order.get('fulfillment', '')}")
-                    st.write(f"**Address:** {order.get('address', '') or '—'}")
-                    st.write(f"**Pickup details:** {order.get('pickup_note', '') or '—'}")
-                with b:
+                    st.write(f"**Fulfillment:** {order.get('fulfillment', '')}")
+                    st.write(f"**Address:** {order.get('address', '') or 'Not provided'}")
+                    st.write(f"**Pickup details:** {order.get('pickup_note', '') or 'Not provided'}")
+
+                with right:
+                    st.write(f"**Subtotal:** {money(order.get('subtotal'))}")
+                    st.write(f"**Delivery fee:** {money(order.get('delivery_fee'))}")
+                    st.write(f"**Total:** {money(order.get('total_amount'))}")
                     st.write(f"**Payment method:** {order.get('payment_method', '')}")
-                    st.write(f"**Payment status:** {order.get('payment_status', '')}")
-                    st.write(f"**Total:** {money(order.get('total_amount', order.get('total', 0)))}")
-                    st.write(f"**Placed:** {order.get('created_at', '')}")
-                try:
-                    items = json.loads(order.get("items_json", "[]") or "[]")
-                    if isinstance(items, list) and items:
-                        st.write("**Items**")
-                        for item in items:
-                            st.write(f"• {item.get('name', item.get('title', 'Item'))} × {item.get('quantity', 1)}")
-                except (TypeError, json.JSONDecodeError):
-                    st.caption("Order items could not be decoded.")
-                current_status = str(order.get(status_col, "Pending")) if status_col else "Pending"
-                status_options = ["New", "Pending", "Confirmed", "Preparing", "Ready", "Completed", "Cancelled"]
-                if current_status not in status_options:
-                    status_options.insert(0, current_status)
-                with st.form(f"update_order_{order_id}"):
-                    new_status = st.selectbox("Order status", status_options, index=status_options.index(current_status))
-                    current_payment = str(order.get("payment_status", "Unpaid"))
-                    payment_options = ["Unpaid", "Pending", "Paid", "Failed", "Refunded", current_payment]
-                    payment_options = list(dict.fromkeys(payment_options))
-                    new_payment = st.selectbox("Payment status", payment_options, index=payment_options.index(current_payment))
-                    message = st.text_area("Message for customer", value=str(order.get("admin_message", "") or ""), help="This is saved to the order. It will appear to customers only if the customer app displays this field.")
-                    if "expected_date" in order.index:
-                        expected = st.text_input("Expected completion date (e.g. 2026-11-01)", value=str(order.get("expected_date", "") or ""))
+                    st.write(f"**Payment status:** {order.get('payment_status', 'Pending')}")
+                    st.write(f"**Order date:** {safe_date(order.get('created_at'))}")
+
+                st.write("**Items**")
+                items = order_items(order)
+                if items:
+                    if isinstance(items, list):
+                        st.json(items)
                     else:
-                        expected = st.text_input("Estimated days until completion", value=str(order.get("estimated_days", 7) or 7))
-                    save = st.form_submit_button("Save order update", type="primary")
-                if save:
-                    set_order_fields(order_id, new_status, new_payment, message, expected)
-                    st.success("Order updated.")
-                    st.rerun()
+                        st.write(items)
+                else:
+                    st.write("No item details saved.")
+
+                statuses = [
+                    "New",
+                    "Discussing",
+                    "In Progress",
+                    "Waiting for Customer",
+                    "Completed",
+                    "Cancelled",
+                ]
+
+                payment_statuses = [
+                    "Pending",
+                    "Paid",
+                    "Failed",
+                    "Refunded",
+                ]
+
+                current_status = order.get("status", "New")
+                current_payment = order.get("payment_status", "Pending")
+
+                if current_status not in statuses:
+                    current_status = "New"
+                if current_payment not in payment_statuses:
+                    current_payment = "Pending"
+
+                with st.form(f"order_form_{order_id}"):
+                    new_status = st.selectbox(
+                        "Order status",
+                        statuses,
+                        index=statuses.index(current_status),
+                    )
+
+                    new_payment_status = st.selectbox(
+                        "Payment status",
+                        payment_statuses,
+                        index=payment_statuses.index(current_payment),
+                    )
+
+                    admin_message = st.text_area(
+                        "Message for customer",
+                        value=order.get("admin_message") or "",
+                        placeholder="Example: Your handmade order will be ready in 5 days.",
+                    )
+
+                    expected_date = st.text_input(
+                        "Expected completion/delivery date (YYYY-MM-DD)",
+                        value=str(order.get("expected_date") or "")[:10],
+                    )
+
+                    save_order = st.form_submit_button(
+                        "Save order changes",
+                        use_container_width=True,
+                    )
+
+                if save_order:
+                    if expected_date.strip():
+                        try:
+                            date.fromisoformat(expected_date.strip())
+                        except ValueError:
+                            st.error("Enter the date as YYYY-MM-DD.")
+                            st.stop()
+
+                    updated = update_row(
+                        "orders",
+                        order_id,
+                        {
+                            "status": new_status,
+                            "payment_status": new_payment_status,
+                            "admin_message": admin_message.strip(),
+                            "expected_date": expected_date.strip() or None,
+                        },
+                    )
+
+                    if updated:
+                        st.success("Order updated.")
+                        st.rerun()
+
+
+# ---------------- PRODUCTS ----------------
 
 elif page == "Products":
-    st.subheader("Add a product/design")
-    with st.form("add_product", clear_on_submit=True):
-        name = st.text_input("Design name")
-        category = st.text_input("Category", value="Crochet")
-        description = st.text_area("Description")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            price = st.number_input("Selling price (PKR)", min_value=0.0, value=700.0, step=50.0)
-        with col2:
-            cost = st.number_input("Material/labour cost (PKR)", min_value=0.0, value=0.0, step=50.0)
-        with col3:
-            stock = st.number_input("Stock quantity", min_value=0, value=10, step=1)
-        image_url = st.text_input("Image URL (optional)")
-        add = st.form_submit_button("Add design", type="primary")
-    if add:
-        if not name.strip():
-            st.error("Please enter a design name.")
-        else:
-            now = datetime.now().isoformat(timespec="seconds")
-            cols = product_cols
-            fields, vals = ["name"], [name.strip()]
-            for col, val in [("category", category.strip() or "Crochet"), ("description", description.strip()), ("price", price), ("cost", cost), ("stock", stock), ("image_url", image_url.strip()), ("active", 1), ("created_at", now)]:
-                if col in cols:
-                    fields.append(col); vals.append(val)
-            with connect() as con:
-                con.execute(f"INSERT INTO products ({','.join(fields)}) VALUES ({','.join(['?']*len(fields))})", vals)
-                con.commit()
-            st.success("Design added.")
-            st.rerun()
-    st.divider()
-    st.subheader("Existing designs")
-    products = safe_df("SELECT * FROM products ORDER BY id DESC")
-    if products.empty:
-        st.info("No products found.")
-    else:
-        for _, product in products.iterrows():
-            pid = int(product["id"])
-            with st.expander(f"{product.get('name', 'Design')} · {money(product.get('price', 0))}"):
-                with st.form(f"product_{pid}"):
-                    pname = st.text_input("Name", value=str(product.get("name", "")))
-                    pcategory = st.text_input("Category", value=str(product.get("category", "Crochet")))
-                    pdescription = st.text_area("Description", value=str(product.get("description", "")))
-                    pprice = st.number_input("Price (PKR)", min_value=0.0, value=float(product.get("price", 0) or 0), step=50.0)
-                    pcost = st.number_input("Cost (PKR)", min_value=0.0, value=float(product.get("cost", 0) or 0), step=50.0)
-                    pstock = st.number_input("Stock", min_value=0, value=int(product.get("stock", 0) or 0), step=1)
-                    pactive = st.checkbox("Visible in store", value=bool(product.get("active", 1)))
-                    pimage = st.text_input("Image URL", value=str(product.get("image_url", "") or ""))
-                    update = st.form_submit_button("Save design changes", type="primary")
-                if update:
-                    fields, vals = [], []
-                    for col, val in [("name", pname.strip()), ("category", pcategory.strip() or "Crochet"), ("description", pdescription.strip()), ("price", pprice), ("cost", pcost), ("stock", pstock), ("active", int(pactive)), ("image_url", pimage.strip())]:
-                        if col in product_cols:
-                            fields.append(f'"{col}"=?'); vals.append(val)
-                    if fields:
-                        vals.append(pid)
-                        with connect() as con:
-                            con.execute(f"UPDATE products SET {','.join(fields)} WHERE id=?", vals)
-                            con.commit()
-                    st.success("Design saved.")
+    st.title("Product Management")
+
+    with st.expander("➕ Add a new product", expanded=not products):
+        with st.form("add_product_form", clear_on_submit=True):
+            name = st.text_input("Product name")
+            category = st.selectbox(
+                "Category",
+                [
+                    "Crochet Flowers",
+                    "Keychains",
+                    "Plushies",
+                    "Accessories",
+                    "Home Decor",
+                    "Custom Designs",
+                    "Other",
+                ],
+            )
+            description = st.text_area("Description")
+            price = st.number_input("Selling price (PKR)", min_value=0.0, step=50.0)
+            cost = st.number_input("Estimated cost (PKR)", min_value=0.0, step=50.0)
+            stock = st.number_input("Stock quantity", min_value=0, step=1)
+            image_url = st.text_input("Image URL (optional)")
+            active = st.checkbox("Visible in customer store", value=True)
+
+            add_product = st.form_submit_button(
+                "Add product",
+                use_container_width=True,
+            )
+
+        if add_product:
+            if not name.strip():
+                st.error("Enter a product name.")
+            else:
+                success = insert_row(
+                    "products",
+                    {
+                        "name": name.strip(),
+                        "category": category,
+                        "description": description.strip(),
+                        "price": float(price),
+                        "cost": float(cost),
+                        "stock": int(stock),
+                        "image_url": image_url.strip() or None,
+                        "active": bool(active),
+                    },
+                )
+                if success:
+                    st.success("Product added.")
                     st.rerun()
-                if "image_url" in product.index and product.get("image_url"):
-                    st.image(str(product.get("image_url")), width=180)
+
+    st.divider()
+    st.subheader("Existing Products")
+
+    if not products:
+        st.info("No products have been added yet.")
+    else:
+        for product in products:
+            product_id = product.get("id")
+
+            with st.expander(
+                f"{product.get('name', 'Product')} — "
+                f"{money(product.get('price'))}"
+            ):
+                if product.get("image_url"):
+                    st.image(product["image_url"], width=180)
+
+                with st.form(f"product_form_{product_id}"):
+                    p_name = st.text_input(
+                        "Product name",
+                        value=product.get("name") or "",
+                    )
+                    p_category = st.text_input(
+                        "Category",
+                        value=product.get("category") or "",
+                    )
+                    p_description = st.text_area(
+                        "Description",
+                        value=product.get("description") or "",
+                    )
+                    p_price = st.number_input(
+                        "Price (PKR)",
+                        min_value=0.0,
+                        value=float(product.get("price") or 0),
+                        step=50.0,
+                    )
+                    p_cost = st.number_input(
+                        "Estimated cost (PKR)",
+                        min_value=0.0,
+                        value=float(product.get("cost") or 0),
+                        step=50.0,
+                    )
+                    p_stock = st.number_input(
+                        "Stock",
+                        min_value=0,
+                        value=int(product.get("stock") or 0),
+                        step=1,
+                    )
+                    p_image = st.text_input(
+                        "Image URL",
+                        value=product.get("image_url") or "",
+                    )
+                    p_active = st.checkbox(
+                        "Visible in customer store",
+                        value=bool(product.get("active", True)),
+                    )
+
+                    save_product = st.form_submit_button(
+                        "Save product changes",
+                        use_container_width=True,
+                    )
+
+                if save_product:
+                    if not p_name.strip():
+                        st.error("Product name cannot be empty.")
+                    else:
+                        success = update_row(
+                            "products",
+                            product_id,
+                            {
+                                "name": p_name.strip(),
+                                "category": p_category.strip(),
+                                "description": p_description.strip(),
+                                "price": float(p_price),
+                                "cost": float(p_cost),
+                                "stock": int(p_stock),
+                                "image_url": p_image.strip() or None,
+                                "active": bool(p_active),
+                            },
+                        )
+                        if success:
+                            st.success("Product updated.")
+                            st.rerun()
+
+                st.caption(
+                    f"Estimated profit per item: "
+                    f"{money(float(product.get('price') or 0) - float(product.get('cost') or 0))}"
+                )
+
+                if st.button(
+                    "Delete product",
+                    key=f"delete_product_{product_id}",
+                    type="secondary",
+                ):
+                    if delete_row("products", product_id):
+                        st.success("Product deleted.")
+                        st.rerun()
+
+
+# ---------------- CUSTOMERS ----------------
 
 elif page == "Customers":
-    if "customers" not in available:
-        st.info("This database does not have a customers table.")
+    st.title("Customer Management")
+
+    if customers:
+        display_customers = [
+            {
+                "Name": c.get("name", ""),
+                "Email": c.get("email", ""),
+                "Created": safe_date(c.get("created_at")),
+            }
+            for c in customers
+        ]
+
+        customer_df = pd.DataFrame(display_customers)
+        st.dataframe(
+            customer_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.download_button(
+            "Download customer CSV",
+            data=customer_df.to_csv(index=False).encode("utf-8"),
+            file_name="croshia_customers.csv",
+            mime="text/csv",
+        )
     else:
-        customers = safe_df("SELECT id, name, email, created_at FROM customers ORDER BY id DESC")
-        st.metric("Registered customers", len(customers))
-        if customers.empty:
-            st.info("No customer accounts registered yet.")
-        else:
-            st.dataframe(customers, use_container_width=True, hide_index=True)
-            st.download_button("Download customer list (CSV)", customers.to_csv(index=False).encode("utf-8"), "croshia_customers.csv", "text/csv")
+        st.info("No registered customers yet.")
+
+
+# ---------------- SETTINGS ----------------
 
 elif page == "Settings":
-    st.subheader("Store database")
-    st.write(f"**Database path:** `{DB_PATH}`")
-    st.write(f"**Tables found:** {', '.join(sorted(available))}")
-    st.info("This admin app uses the same SQLite schema as the current Croshia customer app. Separate hosted apps need a shared cloud database to see each other's records.")
-    st.subheader("Profit estimate")
-    products = safe_df("SELECT * FROM products")
-    if not products.empty and {"price", "cost"}.issubset(products.columns):
-        products["estimated_profit_per_item"] = products["price"].fillna(0) - products["cost"].fillna(0)
-        st.dataframe(products[[c for c in ["name", "price", "cost", "estimated_profit_per_item", "stock"] if c in products.columns]], use_container_width=True, hide_index=True)
+    st.title("Store Settings")
+    st.caption("These settings are shared through your Supabase database.")
+
+    settings_map = {
+        str(row.get("key")): row
+        for row in settings_rows
+        if row.get("key") is not None
+    }
+
+    def setting_value(key, default=""):
+        row = settings_map.get(key)
+        return str(row.get("value", default)) if row else str(default)
+
+    with st.form("store_settings_form"):
+        store_name = st.text_input(
+            "Store name",
+            value=setting_value("store_name", "Croshia Studio"),
+        )
+
+        about = st.text_area(
+            "Store description",
+            value=setting_value("about", "Handmade crochet designs made with care."),
+        )
+
+        try:
+            delivery_fee_default = float(
+                setting_value("delivery_fee", "150")
+            )
+        except ValueError:
+            delivery_fee_default = 150.0
+
+        delivery_fee = st.number_input(
+            "Delivery fee (PKR)",
+            min_value=0.0,
+            value=delivery_fee_default,
+            step=50.0,
+        )
+
+        delivery_enabled = st.checkbox(
+            "Enable delivery",
+            value=setting_value("delivery_enabled", "true").lower() == "true",
+        )
+
+        pickup_enabled = st.checkbox(
+            "Enable pickup",
+            value=setting_value("pickup_enabled", "true").lower() == "true",
+        )
+
+        pickup_note = st.text_area(
+            "Pickup instructions",
+            value=setting_value("pickup_note", ""),
+        )
+
+        save_settings = st.form_submit_button(
+            "Save store settings",
+            use_container_width=True,
+        )
+
+    if save_settings:
+        settings_to_save = {
+            "store_name": store_name.strip(),
+            "about": about.strip(),
+            "delivery_fee": str(float(delivery_fee)),
+            "delivery_enabled": str(delivery_enabled).lower(),
+            "pickup_enabled": str(pickup_enabled).lower(),
+            "pickup_note": pickup_note.strip(),
+        }
+
+        failed = False
+
+        for key, value in settings_to_save.items():
+            existing = settings_map.get(key)
+
+            try:
+                if existing:
+                    db().table("settings").update(
+                        {"value": value}
+                    ).eq("key", key).execute()
+                else:
+                    db().table("settings").insert(
+                        {"key": key, "value": value}
+                    ).execute()
+            except Exception as exc:
+                failed = True
+                st.error(f"Could not save setting '{key}': {exc}")
+
+        if not failed:
+            st.success("Store settings saved.")
+            st.rerun()
+
+    st.divider()
+    st.subheader("Database Status")
+    st.write("Connected project:", SUPABASE_URL)
+    st.write("Orders loaded:", len(orders))
+    st.write("Products loaded:", len(products))
+    st.write("Customers loaded:", len(customers))
+
+    st.warning(
+        "Keep your SUPABASE_SERVICE_ROLE_KEY private. "
+        "Never place it in public code or share it with customers."
+    )
