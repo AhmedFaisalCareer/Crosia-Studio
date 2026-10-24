@@ -7,6 +7,7 @@ from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 from supabase import create_client
+import json
 
 st.set_page_config(
     page_title="Croshia Admin Dashboard",
@@ -139,15 +140,6 @@ def order_items(order):
             return []
 
     return items if isinstance(items, list) else []
-
-def order_items(order):
-    items = order.get("items_json", [])
-    if isinstance(items, str):
-        try:
-            items = json.loads(items)
-        except Exception:
-            return items
-    return items
 
 
 # ---------------- LOGIN ----------------
